@@ -124,19 +124,6 @@ git push
 
 `git clone` creates an `origin` remote automatically. `git push` sends only the current local branch. `git pull` is fast-forward only; it will not create a merge commit or resolve conflicts.
 
-## Turbo Pascal project advice
-
-This client does not interpret `.gitignore` patterns. `git add -A` recursively adds files under the working directory (excluding `.git`) and detects tracked deletions. For a Turbo Pascal project, it is safer to add source paths explicitly if compiler outputs are mixed with source files.
-
-Usually useful to track:
-
-- `*.PAS`, `*.INC`, project/source configuration, documentation, and source assets.
-
-Usually generated and often excluded:
-
-- `*.TPU`, `*.OBJ`, `*.EXE`, compiler temporary files, and other reproducible build outputs.
-
-The program handles small repositories: paths are limited to 1023 bytes, a file/pack/HTTP response is limited to 64 MiB, and the object traversal is bounded. Packfiles received over HTTP are expanded to loose objects, so the ThinkPad may use more disk space than a modern Git clone.
 
 ## Unsupported Git features
 

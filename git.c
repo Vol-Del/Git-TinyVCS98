@@ -1,3 +1,15 @@
+/*
+ * TinyVCS98 - a small Git-compatible command-line client for Windows 98.
+ *
+ * Reads/writes standard SHA-1 Git objects and index v2, reads Git packfiles,
+ * and implements Git smart HTTP protocol v0 over http:// and https:// (built-in TLS 1.2).
+ *
+ * Intended target: Open Watcom C/C++ 2.x, 32-bit Win32 (Windows 95/98/Me).
+ * The source is written in conservative C and can also be built on POSIX for
+ * interoperability tests. See README.md for transport and format limitations.
+ *
+ * Copyright (c) 2026. MIT License; see LICENSE.txt.
+ */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -80,7 +92,9 @@ static int mkdirs(const char *p)
     if (!p || !*p || strlen(p) >= sizeof(tmp)) return 0;
     strcpy(tmp, p); n = strlen(tmp);
     for (i=1; i<n; ++i) if (tmp[i]=='/' || tmp[i]=='\\') {
-        char c=tmp[i]; tmp[i]='\0';
+        char c=tmp[i];
+        if (i==2 && tmp[1]==':') continue;            /* drive prefix "C:" is not a directory */
+        tmp[i]='\0';
         if (*tmp && !make_dir(tmp)) { tmp[i]=c; return 0; }
         tmp[i]=c;
     }
@@ -573,11 +587,16 @@ static int cmd_rm(const char *arg)
 {
     Index idx;char rel[MAX_PATH_GIT],fs[MAX_PATH_GIT];if(!require_repository())return 1;if(!normalize_path(arg,rel,sizeof(rel))||!index_read(&idx)){fprintf(stderr,"git: invalid path or index\n");return 1;}if(!index_remove(&idx,rel)){fprintf(stderr,"git: path not staged/tracked: %s\n",rel);index_free(&idx);return 1;}to_fs_path(fs,rel);remove_file(fs);if(!index_write(&idx)){index_free(&idx);return 1;}index_free(&idx);return 0;
 }
+static int global_get(const char *key,char *out,size_t cap);
 static int read_user(char *name,size_t nc,char *email,size_t ec)
 {
     Buffer b;unsigned long p;if(!read_file(".git/config",&b)){strcpy(name,"TinyVCS98 User");strcpy(email,"tinyvcs98@localhost");return 1;}
     p=0;while(p<b.len){unsigned long e=p;while(e<b.len&&b.data[e]!='\n')++e;if(e-p>=6&&!memcmp(b.data+p,"[user]",6)){p=e+1;while(p<b.len&&b.data[p]!='['){e=p;while(e<b.len&&b.data[e]!='\n')++e;if(e-p>=4&&!memcmp(b.data+p,"name",4)){char *q=(char*)b.data+p+4;while(q<(char*)b.data+e&&(*q==' '||*q=='\t'||*q=='='))++q;while(e>p&&isspace(b.data[e-1]))--e;if((size_t)((char*)b.data+e-q)<nc){memcpy(name,q,(size_t)((char*)b.data+e-q));name[(char*)b.data+e-q]=0;}}if(e-p>=5&&!memcmp(b.data+p,"email",5)){char *q=(char*)b.data+p+5;while(q<(char*)b.data+e&&(*q==' '||*q=='\t'||*q=='='))++q;while(e>p&&isspace(b.data[e-1]))--e;if((size_t)((char*)b.data+e-q)<ec){memcpy(email,q,(size_t)((char*)b.data+e-q));email[(char*)b.data+e-q]=0;}}p=e+1;}break;}p=e+1;}
-    free(b.data);if(!*name)strcpy(name,"TinyVCS98 User");if(!*email)strcpy(email,"tinyvcs98@localhost");return 1;
+    free(b.data);
+    {char g[256];
+     if((!*name||!strcmp(name,"TinyVCS98 User"))&&global_get("user.name",g,sizeof(g))&&g[0]&&strlen(g)<nc)strcpy(name,g);
+     if((!*email||!strcmp(email,"tinyvcs98@localhost"))&&global_get("user.email",g,sizeof(g))&&g[0]&&strlen(g)<ec)strcpy(email,g);}
+    if(!*name)strcpy(name,"TinyVCS98 User");if(!*email)strcpy(email,"tinyvcs98@localhost");return 1;
 }
 static int cmd_commit(const char *message)
 {
@@ -1485,6 +1504,92 @@ static const char *exe_dir(void)
     }
     return dir;
 }
+/* ---- global configuration: git config --global user.name / user.email / user.token ----
+ * Stored in a small INI file ("gitconfig") next to git.exe, or in the file named by
+ * GIT_CONFIG_GLOBAL. (Win98 has no per-user home directory, so the exe folder is used.) */
+static void global_config_path(char *out,size_t cap)
+{
+    const char *env=getenv("GIT_CONFIG_GLOBAL");
+    out[0]=0;
+    if(env&&*env){if(strlen(env)<cap)strcpy(out,env);return;}
+#if defined(__WATCOMC__)
+    if(strlen(exe_dir())+10<cap){strcpy(out,exe_dir());strcat(out,"gitconfig");}
+#else
+    env=getenv("HOME");
+    if(env&&*env&&strlen(env)+20<cap){strcpy(out,env);strcat(out,"/.tinyvcs98-gitconfig");}
+    else if(cap>10)strcpy(out,"gitconfig");
+#endif
+}
+/* Is this line "[user]"? */
+static int cfg_is_user_header(const char *l,size_t n)
+{
+    while(n&&(*l==' '||*l=='\t')){++l;--n;}
+    while(n&&(l[n-1]=='\r'||l[n-1]==' '||l[n-1]=='\t'))--n;
+    return n==6&&!memcmp(l,"[user]",6);
+}
+/* If the line is "key = value" with the given key, return a pointer to the value start and set *vend. */
+static const char *cfg_match_key(const char *l,size_t n,const char *key,const char **vend)
+{
+    size_t kl=strlen(key);const char *e=l+n;
+    while(l<e&&(*l==' '||*l=='\t'))++l;
+    if((size_t)(e-l)<kl||STRNICMP(l,key,kl)!=0)return NULL;
+    l+=kl;while(l<e&&(*l==' '||*l=='\t'))++l;
+    if(l>=e||*l!='=')return NULL;
+    ++l;while(l<e&&(*l==' '||*l=='\t'))++l;
+    while(e>l&&(e[-1]=='\r'||e[-1]==' '||e[-1]=='\t'))--e;
+    *vend=e;return l;
+}
+static int global_get(const char *key,char *out,size_t cap)
+{
+    char path[MAX_PATH_GIT];Buffer b;unsigned long p=0;int in_user=0,found=0;const char *k;
+    out[0]=0;if(STRNICMP(key,"user.",5)!=0)return 0;k=key+5;
+    global_config_path(path,sizeof(path));if(!path[0]||!read_file(path,&b))return 0;
+    while(p<b.len){
+        unsigned long e=p;const char *v,*ve;
+        while(e<b.len&&b.data[e]!='\n')++e;
+        if(b.data[p]=='[')in_user=cfg_is_user_header((const char*)b.data+p,e-p);
+        else if(in_user&&(v=cfg_match_key((const char*)b.data+p,e-p,k,&ve))!=NULL){
+            if((size_t)(ve-v)<cap){memcpy(out,v,(size_t)(ve-v));out[ve-v]=0;found=1;}
+        }
+        p=e+1;
+    }
+    free(b.data);return found;
+}
+/* Set (or, with an empty value, remove) one key in [user]. The rest of the file is preserved. */
+static int global_set(const char *key,const char *value)
+{
+    char path[MAX_PATH_GIT];Buffer b,o;unsigned long p=0;int in_user=0,done=0,had_user=0;const char *k;char line[600];int n;
+    if(STRNICMP(key,"user.",5)!=0)return 0;k=key+5;
+    if(strlen(k)+strlen(value)+8>=sizeof(line)||strchr(value,'\n')||strchr(value,'\r')){fprintf(stderr,"git: value too long or contains a line break\n");return 0;}
+    global_config_path(path,sizeof(path));if(!path[0])return 0;
+    if(!read_file(path,&b)){b.data=NULL;b.len=0;}
+    o.data=NULL;o.len=0;
+    n=sprintf(line,"\t%s = %s\n",k,value);
+    while(p<b.len){
+        unsigned long e=p,next;const char *ve;
+        while(e<b.len&&b.data[e]!='\n')++e;
+        next=e<b.len?e+1:e;
+        if(b.data[p]=='['){
+            if(in_user&&!done&&*value){if(!buf_append(&o,line,(unsigned long)n))goto fail;done=1;}
+            in_user=cfg_is_user_header((const char*)b.data+p,e-p);if(in_user)had_user=1;
+        }else if(in_user&&cfg_match_key((const char*)b.data+p,e-p,k,&ve)!=NULL){
+            if(!done&&*value){if(!buf_append(&o,line,(unsigned long)n))goto fail;done=1;}
+            p=next;continue;                                   /* drop old line (or all duplicates) */
+        }
+        if(!buf_append(&o,(const char*)b.data+p,e-p))goto fail;
+        if(!buf_append(&o,"\n",1))goto fail;
+        p=next;
+    }
+    if(!done&&*value){
+        if(!had_user&&!buf_append(&o,"[user]\n",7))goto fail;
+        if(!buf_append(&o,line,(unsigned long)n))goto fail;
+        /* if [user] existed but was last, the line lands at the end of the file, i.e. inside it */
+    }
+    if(!write_file(path,o.data?o.data:(const U8*)"",o.len)){fprintf(stderr,"git: cannot write %s\n",path);goto fail;}
+    if(b.data)free(b.data);if(o.data)free(o.data);return 1;
+fail:
+    if(b.data)free(b.data);if(o.data)free(o.data);return 0;
+}
 static int trust_load(void)
 {
     char path[MAX_PATH_GIT+32];const char *env;Buffer b;
@@ -1953,6 +2058,17 @@ static int http_request_impl(const char *base,const char *suffix,const char *met
 {
     HttpURL orig,u,nu;Buffer res;HttpResp info;int redirects;size_t a,b;
     if(!parse_http_url(base,&orig))return 0;
+    if(!orig.has_auth){   /* no user:token@ in the URL: use user.token from the global config, https only */
+        char tok[256],nm[128];
+        if(global_get("user.token",tok,sizeof(tok))&&tok[0]){
+            if(!orig.https){fprintf(stderr,"git: user.token is not sent over plain http://\n");}
+            else{
+                if(!global_get("user.name",nm,sizeof(nm))||!nm[0])strcpy(nm,"git");
+                strcpy(orig.user,nm);strcpy(orig.pass,tok);orig.has_auth=1;
+            }
+        }
+        memset(tok,0,sizeof(tok));
+    }
     u=orig;
     if(g_redir_to[0]&&!strcmp(base,g_redir_from)){
         HttpURL r;
@@ -2264,9 +2380,28 @@ static int cmd_pull(const char *remote)
     index_free(&oldidx);index_free(&newidx);printf("Fast-forwarded %s.\n",target+11);return 0;
 }
 
+static int cmd_config(int argc,char **argv)
+{
+    char val[512];const char *key,*newval=NULL;
+    if(argc<2||strcmp(argv[0],"--global")!=0){fprintf(stderr,"usage: git config --global user.name|user.email|user.token [value]\n");return 1;}
+    key=argv[1];
+    {   /* tolerate a missing space before a quoted value: user.name"Bob" arrives as user.nameBob */
+        static const char *const keys[]={"user.name","user.email","user.token"};unsigned int ki;
+        if(argc==2)for(ki=0;ki<3;++ki){size_t kl=strlen(keys[ki]);
+            if(STRNICMP(key,keys[ki],kl)==0&&key[kl]){newval=key+kl;key=keys[ki];break;}}
+    }
+    if(STRICMP(key,"user.name")&&STRICMP(key,"user.email")&&STRICMP(key,"user.token")){fprintf(stderr,"git: unsupported config key '%s' (use user.name, user.email or user.token)\n",key);return 1;}
+    if(argc==3)newval=argv[2];
+    else if(argc>3){fprintf(stderr,"usage: git config --global %s \"value\"\n",key);return 1;}
+    if(!newval){if(global_get(key,val,sizeof(val))){printf("%s\n",val);return 0;}return 1;}
+    if(!global_set(key,newval))return 1;
+    return 0;
+}
 static void usage(void)
 {
     printf("TinyVCS98 - Git-compatible Win98 command-line client\n\n"
+           "  git config --global user.name \"Your Name\"\n  git config --global user.email \"you@example.com\"\n"
+           "  git config --global user.token \"YOUR-TOKEN\"\n"
            "  git init\n  git clone <http(s)-url> [directory]\n"
            "  git remote add <name> <http(s)-url>\n  git remote -v\n");
     printf("  git add <file-or-directory> [more paths...]\n  git add -A\n"
@@ -2275,12 +2410,13 @@ static void usage(void)
     printf("  git fetch [remote]\n  git pull [remote]  (fast-forward only)\n  git push [remote]\n\n"
            "Git SHA-1 repository format; smart HTTP protocol v0 over HTTP and HTTPS (TLS 1.2).\n");
     printf("HTTPS: CA bundle ca-bundle.crt next to git.exe (or GIT_SSL_CAINFO); GIT_SSL_NO_VERIFY=1 disables checks.\n"
-           "Credentials: https://user:token@host/path.git\n");
+           "Credentials: https://user:token@host/path.git, or set user.name + user.token once with git config --global\n");
 }
 int main(int argc,char **argv)
 {
     const char *remote="origin";
     if(argc<2){usage();return 1;}
+    if(!strcmp(argv[1],"config"))return cmd_config(argc-2,argv+2);
     if(!strcmp(argv[1],"init")&&argc==2)return cmd_init();
     if(!strcmp(argv[1],"clone")&&(argc==3||argc==4))return cmd_clone(argv[2],argc==4?argv[3]:NULL);
     if(!strcmp(argv[1],"remote"))return cmd_remote(argc-2,argv+2);

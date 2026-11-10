@@ -134,7 +134,7 @@ Setup:
 
 Recommended toolchain: **Open Watcom C/C++ 2.x**, 32-bit Win32 target. From an 
 
-Open Watcom command prompt: wcl386 -q -bt=nt -l=nt -ox -k524288 -fe=git.exe git.c wsock32.lib
+Open Watcom command prompt: `wcl386 -q -bt=nt -l=nt -ox -k524288 -fe=git.exe git.c wsock32.lib`
 
 and produces `git.exe`. Copy it, together with `ca-bundle.crt`, into a folder on your `PATH` (for example `C:\SOFTWARE\GIT`)
 

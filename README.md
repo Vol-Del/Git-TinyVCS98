@@ -1,6 +1,8 @@
 # TinyVCS98 — Git-compatible client for Windows 98
 
+<center>
 <img width="489" height="157" alt="TinyVCS98" src="https://github.com/user-attachments/assets/1545795a-c742-4beb-a804-61ba8ae5e2e2" />
+</center>
 
 TinyVCS98 builds a single executable named **`git.exe`** that reads and writes normal Git repositories. It is meant for small retro projects, such as which developed on a Windows 98. In my case for developing small games using Turbo Pascal on my Thinkpad T42
 
